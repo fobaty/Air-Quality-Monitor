@@ -36,6 +36,7 @@ HardwareSerial PMS(1);
 /* Display */
 SPIClass spiTFT(FSPI);
 Adafruit_ST7735 tft = Adafruit_ST7735(&spiTFT, TFT_CS, TFT_DC, TFT_RST);
+unsigned long displayInterval = 5000;
 
 /* -------- Sensor states -------- */
 bool scd30Detected = false;
@@ -158,23 +159,20 @@ tft.setRotation(0);
 tft.fillScreen(ST77XX_BLACK);
 
 tft.setTextColor(ST77XX_CYAN);
-tft.setTextSize(2);
+tft.setTextSize(1);
 
 tft.setCursor(20, 0);
-tft.println("ESP32");
+tft.println("Air");
 tft.setCursor(20, 25);
-tft.println("AQI");
+tft.println("Quality");
 tft.setCursor(20, 50);
 tft.println("Monitor");
 
 tft.setTextColor(ST77XX_WHITE);
 tft.setTextSize(1);
 tft.setCursor(20, 80);
-tft.println("Version: 1.1");
-
-tft.setCursor(20, 100);
 tft.println("Initializing...");
-
+delay(3000);
 
   /* -------- I2C -------- */
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -226,6 +224,7 @@ tft.println("Initializing...");
 
   server.begin();
   Serial.println("🌐 Web server started");
+  tft.fillScreen(ST77XX_BLACK);
 }
 
 void loop() {
@@ -262,86 +261,65 @@ void loop() {
 
     Serial.println("================================");
 
-    //* -------- Display update -------- */
-if (millis() - lastDisplay > 2000) {
-  lastDisplay = millis();
+/* -------- Display update -------- */
+    if (millis() - lastDisplay > 2000) {
+      lastDisplay = millis();
 
-  tft.fillScreen(ST77XX_BLACK);
+      tft.setTextSize(1);
+      tft.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
+      tft.setCursor(30, 0);
+      tft.print("Air Quality");
+      
+      int yOffset = 25;
+      tft.setTextSize(1);
 
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_CYAN);
-  tft.setCursor(45, 0);
-  tft.println("AQI");
-  
-  int yOffset = 20;
+      // --- CO2 ---
+      String co2Lvl = co2Level(co2);
+      uint16_t co2Clr = ST77XX_WHITE;
+      if (co2Lvl == "Good") co2Clr = ST77XX_GREEN;
+      else if (co2Lvl == "Moderate") co2Clr = ST77XX_ORANGE;
+      else if (co2Lvl == "Poor") co2Clr = ST77XX_RED;
+      else co2Clr = ST77XX_MAGENTA;
 
-  // --- Data ---
-  tft.setTextSize(1);
-  
-  // CO2
-  String co2Lvl = co2Level(co2);
-  uint16_t co2Clr = ST77XX_WHITE;
-  if (co2Lvl == "Good") co2Clr = ST77XX_GREEN;
-  else if (co2Lvl == "Moderate") co2Clr = ST77XX_ORANGE;
-  else if (co2Lvl == "Poor") co2Clr = ST77XX_RED;
-  else co2Clr = ST77XX_MAGENTA;
+      tft.setTextColor(co2Clr, ST77XX_BLACK); 
+      tft.setCursor(1, yOffset);
+      tft.printf("CO2: %.0f ppm           ", co2); 
+      yOffset += 12;
+      tft.setCursor(30, yOffset);
+      tft.printf("(%s)               ", co2Lvl.c_str()); 
+      yOffset += 20;
 
-  tft.setTextColor(co2Clr);
+      // --- Temp & Hum ---
+      tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+      tft.setCursor(0, yOffset);
+      tft.printf("Temp: %.1f C   ", temperature);
+      yOffset += 12;
+      tft.setCursor(1, yOffset);
+      tft.printf("Hum:  %.1f %%   ", humidity);
+      yOffset += 20;
 
-  tft.setCursor(0, yOffset);
-  tft.printf("CO2: %.0f ppm", co2);
-  yOffset += 20;
+      // --- PM1.0 ---
+      String pm1Lvl = pmLevel(pm1);
+      uint16_t pm1Clr = (pm1Lvl == "Good") ? ST77XX_GREEN : (pm1Lvl == "Moderate") ? ST77XX_ORANGE : ST77XX_RED;
+      tft.setTextColor(pm1Clr, ST77XX_BLACK);
+      tft.setCursor(1, yOffset);
+      tft.printf("PM1.0: %u (%s)          ", pm1, pm1Lvl.c_str());
+      yOffset += 16;
 
-  tft.setCursor(0, yOffset);
-  tft.printf("(%s)", co2Lvl.c_str());
-  yOffset += 20;
+      // --- PM2.5 ---
+      String pm25Lvl = pmLevel(pm25);
+      uint16_t pm25Clr = (pm25Lvl == "Good") ? ST77XX_GREEN : (pm25Lvl == "Moderate") ? ST77XX_ORANGE : ST77XX_RED;
+      tft.setTextColor(pm25Clr, ST77XX_BLACK);
+      tft.setCursor(1, yOffset);
+      tft.printf("PM2.5: %u (%s)          ", pm25, pm25Lvl.c_str());
+      yOffset += 16;
 
-  // Temp & Hum
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(0, yOffset);
-  tft.printf("Temp: %.1f C\n", temperature);
-  yOffset += 16;
-  tft.setCursor(0, yOffset);
-  tft.printf("Hum: %.1f %%\n\n", humidity);
-  yOffset += 20;
-
-  // PM1
-  String pm1Lvl = pmLevel(pm1);
-  uint16_t pm1Clr = ST77XX_WHITE;
-  if (pm1Lvl == "Good") pm1Clr = ST77XX_GREEN;
-  else if (pm1Lvl == "Moderate") pm1Clr = ST77XX_ORANGE;
-  else if (pm1Lvl == "Unhealthy") pm1Clr = ST77XX_RED;
-  else pm1Clr = ST77XX_MAGENTA;
-
-  tft.setTextColor(pm1Clr);
-  tft.setCursor(0, yOffset);
-  tft.printf("PM1.0: %u (%s)\n", pm1, pm1Lvl.c_str());
-  yOffset += 20;
-
-  // PM2.5
-  String pm25Lvl = pmLevel(pm25);
-  uint16_t pm25Clr = ST77XX_WHITE;
-  if (pm25Lvl == "Good") pm25Clr = ST77XX_GREEN;
-  else if (pm25Lvl == "Moderate") pm25Clr = ST77XX_ORANGE;
-  else if (pm25Lvl == "Unhealthy") pm25Clr = ST77XX_RED;
-  else pm25Clr = ST77XX_MAGENTA;
-
-  tft.setTextColor(pm25Clr);
-  tft.setCursor(0, yOffset);
-  tft.printf("PM2.5: %u (%s)\n", pm25, pm25Lvl.c_str());
-  yOffset += 20;
-
-  // PM10
-  String pm10Lvl = pmLevel(pm10);
-  uint16_t pm10Clr = ST77XX_WHITE;
-  if (pm10Lvl == "Good") pm10Clr = ST77XX_GREEN;
-  else if (pm10Lvl == "Moderate") pm10Clr = ST77XX_ORANGE;
-  else if (pm10Lvl == "Unhealthy") pm10Clr = ST77XX_RED;
-  else pm10Clr = ST77XX_MAGENTA;
-
-  tft.setTextColor(pm10Clr);
-  tft.setCursor(0, yOffset);
-  tft.printf("PM10 : %u (%s)\n", pm10, pm10Lvl.c_str());
-  }
- }
+      // --- PM10 ---
+      String pm10Lvl = pmLevel(pm10);
+      uint16_t pm10Clr = (pm10Lvl == "Good") ? ST77XX_GREEN : (pm10Lvl == "Moderate") ? ST77XX_ORANGE : ST77XX_RED;
+      tft.setTextColor(pm10Clr, ST77XX_BLACK);
+      tft.setCursor(1, yOffset);
+      tft.printf("PM10 : %u (%s)          ", pm10, pm10Lvl.c_str());
+    }
+  } 
 }
