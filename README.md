@@ -1,4 +1,4 @@
-# AQI Monitor 
+# Air Quality Monitor 
 
 A compact and wireless **Air Quality Monitor** using **ESP32**, capable of measuring:
 
