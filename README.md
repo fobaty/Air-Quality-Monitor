@@ -11,7 +11,7 @@ The project features:
 - A **SPI display (ST7735)** showing all sensor data with color-coded levels to match the web interface.
 - Wi-Fi **Access Point mode** for direct connection to the ESP32.
 - Fully **open-source Arduino code** ready to upload to ESP32 boards.
-![Air Quality Monitor](aqi_monitor.jpg)
+![Air Quality Monitor](air-quality-monitor.jpeg)
 ![Air Quality Monitor_web](web.jpg)
 ---
 
