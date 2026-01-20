@@ -9,25 +9,26 @@
 #include <WebServer.h>
 #include <Wire.h>
 #include <Adafruit_SCD30.h>
-
-/* ===== DISPLAY ===== */
+#include <Preferences.h>
+#include <PubSubClient.h> 
+#include "time.h"
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 
 /* ================= CONFIG ================= */
-const char* AP_SSID = "AIR-SCAN";
-const char* AP_PASS = "12345678";
+const char* AP_SSID_DEF = "AIR-SCAN-CONFIG";
+const char* AP_PASS_DEF = "12345678";
+const int WIFI_TIMEOUT = 10000;
 
-/* I2C pins */
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = -28800;    
+const int   daylightOffset_sec = 3600; 
+
 #define I2C_SDA 12
 #define I2C_SCL 13
-
-/* PMS5003 UART */
 #define PMS_RX 11
 #define PMS_TX 10
-
-/* ST7735 SPI pins */
 #define TFT_SCK  1
 #define TFT_MOSI 2
 #define TFT_RST  3
@@ -35,365 +36,307 @@ const char* AP_PASS = "12345678";
 #define TFT_CS   5
 #define TFT_BL   6
 
-/* ========================================== */
-
+/* ================= GLOBALS ================= */
 WebServer server(80);
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
 Adafruit_SCD30 scd30;
 HardwareSerial PMS(1);
+Preferences preferences;
 
-/* Display */
 SPIClass spiTFT(FSPI);
 Adafruit_ST7735 tft = Adafruit_ST7735(&spiTFT, TFT_CS, TFT_DC, TFT_RST);
-unsigned long displayInterval = 5000;
 
-/* -------- Sensor states -------- */
+String m_srv, m_user, m_pass;
+int m_port;
+bool m_en = false;
+
 bool scd30Detected = false;
-bool pmsDetected = false;
+float co2 = NAN, temperature = NAN, humidity = NAN;
+uint16_t pm1 = 0, pm25 = 0, pm10 = 0;
+unsigned long lastSerial = 0, lastDisplay = 0, lastMqtt = 0, lastMqttRetry = 0;
 
-/* -------- Measurements -------- */
-float co2 = NAN;
-float temperature = NAN;
-float humidity = NAN;
-
-uint16_t pm1 = 0;
-uint16_t pm25 = 0;
-uint16_t pm10 = 0;
-unsigned long lastSerial = 0;
-unsigned long lastDisplay = 0;
-
-/* ===== CO2 Graph ===== */
 #define GRAPH_SAMPLES 60 
 int co2History[GRAPH_SAMPLES];
 int graphIdx = 0;
 unsigned long lastGraphPoint = 0;
 unsigned long graphInterval = 30000;
 
-
-/* ===== Level helpers ===== */
+/* ===== HELPERS ===== */
 String pmLevel(uint16_t v) {
   if (v <= 12) return "Good";
-  if (v <= 35) return "Moderate";
-  if (v <= 55) return "Unhealthy";
-  return "Hazardous";
+  if (v <= 35) return "Fair";
+  if (v <= 55) return "Poor";
+  return "Bad";
 }
-
 String co2Level(float v) {
   if (v <= 800) return "Good";
-  if (v <= 1200) return "Moderate";
+  if (v <= 1200) return "Fair";
   if (v <= 2000) return "Poor";
-  return "Hazardous";
+  return "Bad";
 }
-
 String levelColor(String lvl) {
   if (lvl == "Good") return "green";
-  if (lvl == "Moderate") return "orange";
-  if (lvl == "Unhealthy" || lvl == "Poor") return "red";
+  if (lvl == "Fair") return "orange";
+  if (lvl == "Poor" || lvl == "Bad") return "red";
   return "darkred";
 }
 
-/* ================= HTML ================= */
+/* ================= WEB UI ================= */
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>Air Quality Monitor</title>
-<style>
-.box { padding:10px; margin:6px; border-radius:6px; color:white; }
-.data { font-size:18px; }
-</style>
-</head>
-<body>
-<h2>Air Quality Monitor</h2>
-
-<div id="pm1" class="box">PM1.0</div>
-<div id="pm25" class="box">PM2.5</div>
-<div id="pm10" class="box">PM10</div>
-<div id="co2" class="box">CO₂</div>
-
-<h3>Climate (SCD30)</h3>
-<p class="data">Temperature: <span id="temp">-</span> °C</p>
-<p class="data">Humidity: <span id="hum">-</span> %</p>
-
+<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Air Monitor</title><style>
+ body { font-family: sans-serif; text-align: center; background: #eceff1; margin: 0; padding: 10px; }
+ .panel { background: white; padding: 20px; border-radius: 16px; display: inline-block; width: 100%; max-width: 400px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin-top:10px; }
+ .box { padding:12px; margin:8px 0; border-radius:8px; color:white; font-weight: bold; text-align: left; }
+ .view { display: none; } .active { display: block; }
+ .btn { padding: 12px 20px; background: #607d8b; color: white; border: none; border-radius: 8px; cursor: pointer; width: 100%; margin-top: 10px; font-weight: bold; }
+ #scan-res { text-align: left; margin: 10px 0; max-height: 150px; overflow-y: auto; background: #f9f9f9; border-radius: 8px; }
+ .net-item { cursor: pointer; padding: 10px; border-bottom: 1px solid #eee; font-size: 14px; }
+ .data-row { display: flex; justify-content: space-around; font-size: 1.2em; margin: 15px 0; }
+ input { width: 90%; padding: 12px; margin: 8px 0; border: 1px solid #ccc; border-radius: 6px; }
+ label { display: block; text-align: left; margin-top: 10px; font-weight: bold; color: #455a64; }
+</style></head><body>
+<div id="main-view" class="panel view active">
+ <h2>Air Quality</h2><p id="st-i" style="color:#888;font-size:12px">Loading...</p>
+ <div id="c-b" class="box">CO2: --</div>
+ <div id="p1-b" class="box">PM1.0: --</div>
+ <div id="p25-b" class="box">PM2.5: --</div>
+ <div id="p10-b" class="box">PM10: --</div>
+ <div class="data-row"><div>🌡️ <span id="t-v">--</span>°C</div><div>💧 <span id="h-v">--</span>%</div></div>
+ <button class="btn" onclick="sh('settings-view')">⚙️ Settings</button>
+</div>
+<div id="settings-view" class="panel view">
+ <h2>Settings</h2>
+ <button class="btn" style="background:#2196f3" onclick="scan()">📡 Scan WiFi</button>
+ <div id="scan-res"></div>
+ <form action="/connect" method="POST">
+  <label>WiFi SSID:</label><input name="ssid" id="ssid" placeholder="Keep empty to stay">
+  <label>WiFi Password:</label><input name="pass" type="password">
+  <hr>
+  <label><input type="checkbox" name="m_en" id="m_en" style="width:auto"> Enable MQTT</label>
+  <label>Broker IP:</label><input name="m_srv" id="m_srv">
+  <label>Port:</label><input name="m_port" id="m_port" type="number">
+  <label>User:</label><input name="m_user" id="m_user">
+  <label>Pass:</label><input name="m_pass" id="m_pass" type="password">
+  <button type="submit" class="btn" style="background:#4caf50">Save & Restart</button>
+ </form>
+ <button class="btn" style="background:none;color:#888" onclick="sh('main-view')">← Back</button>
+</div>
 <script>
+function sh(id){document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));document.getElementById(id).classList.add('active');}
 function update(){
  fetch("/status").then(r=>r.json()).then(d=>{
-  setBox("pm1", d.pm1, d.pm1lvl, d.pm1clr);
-  setBox("pm25", d.pm25, d.pm25lvl, d.pm25clr);
-  setBox("pm10", d.pm10, d.pm10lvl, d.pm10clr);
-  setBox("co2", d.co2, d.co2lvl, d.co2clr);
-
-  document.getElementById("temp").innerText = d.temp ?? "-";
-  document.getElementById("hum").innerText  = d.hum ?? "-";
+  document.getElementById("st-i").innerText = d.ssid + " | " + d.ip + " | MQTT: " + d.mq;
+  uB("c-b", d.co2, d.co2lvl, d.co2clr, "CO2"); uB("p1-b", d.pm1, d.pm1lvl, d.pm1clr, "PM1.0");
+  uB("p25-b", d.pm25, d.pm25lvl, d.pm25clr, "PM2.5"); uB("p10-b", d.pm10, d.pm10lvl, d.pm10clr, "PM10");
+  document.getElementById("t-v").innerText = d.temp?? "--"; document.getElementById("h-v").innerText = d.hum?? "--";
+  if(!window.f){
+    document.getElementById("m_en").checked = d.m_en; document.getElementById("m_srv").value = d.m_srv||"";
+    document.getElementById("m_port").value = d.m_port||1883; document.getElementById("m_user").value = d.m_user||"";
+    window.f=true;
+  }
  });
 }
-
-function setBox(id,val,lvl,clr){
- let e=document.getElementById(id);
- e.style.background=clr;
- e.innerText = id.toUpperCase()+": "+val+" ("+lvl+")";
-}
-
-update();
-setInterval(update,5000);
-</script>
-</body>
-</html>
+function uB(id,v,l,c,n){let e=document.getElementById(id);e.style.background=c;e.innerText=n+": "+v+" ("+l+")";}
+function scan(){let r=document.getElementById("scan-res");r.innerHTML="Scanning...";fetch("/scan").then(r=>r.json()).then(data=>{r.innerHTML="";data.forEach(n=>{let d=document.createElement("div");d.className="net-item";d.innerText=n.ssid+" ("+n.rssi+"dBm)";d.onclick=()=>{document.getElementById("ssid").value=n.ssid;};r.appendChild(d);});});}
+setInterval(update, 5000); update();
+</script></body></html>
 )rawliteral";
 
-/* ========================================= */
+/* ================= FUNCTIONS ================= */
+
+void reconnectMqtt() {
+  if (!m_en || WiFi.status() != WL_CONNECTED || m_srv == "") return;
+  if (mqttClient.connected()) return;
+  if (millis() - lastMqttRetry > 15000) {
+    lastMqttRetry = millis();
+    String clientId = "AirScan-" + String(random(0xffff), HEX);
+    mqttClient.connect(clientId.c_str(), m_user.c_str(), m_pass.c_str());
+  }
+}
 
 bool readPMS() {
   if (PMS.available() < 32) return false;
-  if (PMS.read() != 0x42) return false;
-  if (PMS.read() != 0x4D) return false;
-
-  uint8_t buf[30];
-  PMS.readBytes(buf, 30);
-
-  pm1  = buf[8]  << 8 | buf[9];
-  pm25 = buf[10] << 8 | buf[11];
-  pm10 = buf[12] << 8 | buf[13];
-
-  pmsDetected = true;
+  if (PMS.read() != 0x42 || PMS.read() != 0x4D) return false;
+  uint8_t buf[30]; PMS.readBytes(buf, 30);
+  pm1 = buf[8]<<8|buf[9]; pm25 = buf[10]<<8|buf[11]; pm10 = buf[12]<<8|buf[13];
   return true;
 }
 
 void drawCO2Graph(int x, int y, int w, int h) {
-  tft.fillRect(x, y, w, h, ST77XX_BLACK); // Clear the graph area.
-  tft.drawRect(x, y, w, h, 0x4208);       //Draw a dark gray frame.
-
-  // Draw a dashed line representing the "normal" level (800 ppm)
-  int normLine = map(800, 400, 2000, 0, h - 4);
-  for(int i=0; i<w; i+=4) tft.drawPixel(x+i, y + h - 2 - normLine, 0x03E0); // Dark green
-
-  for (int i = 0; i < GRAPH_SAMPLES - 1; i++) {
+  tft.fillRect(x, y, w, h, ST77XX_BLACK); tft.drawRect(x, y, w, h, 0x4208);      
+  int nl = map(800, 400, 2000, 0, h - 4);
+  for(int i=0; i<w; i+=4) tft.drawPixel(x+i, y + h - 2 - nl, 0x03E0); 
+  for (int i=0; i<GRAPH_SAMPLES-1; i++) {
     if (co2History[i+1] == 0) break;
-
     int v1 = map(constrain(co2History[i], 400, 2000), 400, 2000, 0, h - 4);
     int v2 = map(constrain(co2History[i+1], 400, 2000), 400, 2000, 0, h - 4);
-
-    int x1 = x + i * 2; // Step of 2 pixels (60 dots * 2 = 120 pixels wide)
-    int x2 = x + (i + 1) * 2;
-
-    tft.drawLine(x1, y + h - 2 - v1, x2, y + h - 2 - v2, ST77XX_GREEN);
+    tft.drawLine(x + i*2, y + h - 2 - v1, x + (i+1)*2, y + h - 2 - v2, ST77XX_GREEN);
   }
 }
 
+/* ================= SETUP ================= */
 void setup() {
-  setCpuFrequencyMhz(80);
+  setCpuFrequencyMhz(160); 
   Serial.begin(115200);
-  delay(500);
 
- /* -------- Display -------- */
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH);
+  pinMode(TFT_BL, OUTPUT); digitalWrite(TFT_BL, HIGH);
   spiTFT.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
-  tft.initR(INITR_GREENTAB);
-  tft.setRotation(0);
-  tft.fillScreen(ST77XX_BLACK);
+  tft.initR(INITR_GREENTAB); tft.setRotation(0); tft.fillScreen(ST77XX_BLACK);
 
-  /* -------- Splash Screen -------- */
-  tft.drawRoundRect(5, 5, tft.width() - 10, 45, 8, ST77XX_CYAN);
-  
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_CYAN);
-  tft.setCursor(20, 15);
-  tft.print("AIR");
-  tft.setTextColor(ST77XX_WHITE);
-  tft.print(" SCAN");
-  
-  tft.setTextSize(1);
-  tft.setCursor(20, 35);
-  tft.print("Esp32s3-Monitor");
+  // --- SPLASH SCREEN ---
+  tft.drawRoundRect(5, 5, tft.width()-10, 45, 8, ST77XX_CYAN);
+  tft.setTextSize(2); tft.setCursor(20, 15); tft.setTextColor(ST77XX_CYAN); tft.print("AIR SCAN");
+  tft.setTextSize(1); tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(10, 70); tft.println("SYSTEM CHECK:");
 
-  tft.drawFastHLine(10, 60, tft.width() - 20, ST77XX_ORANGE);
-
-  tft.setCursor(10, 75);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.println("SYSTEM CHECK:");
-  
-  auto printStatus = [&](const char* msg, bool ok) {
-    tft.setCursor(10, tft.getCursorY());
-    tft.print(" > ");
-    tft.print(msg);
-    tft.print(":");
-    
+  auto pSt = [&](const char* m, bool ok) {
+    tft.setCursor(10, tft.getCursorY()); tft.print(" > "); tft.print(m); tft.print(":");
     tft.setCursor(95, tft.getCursorY());
-    if (ok) {
-      tft.setTextColor(ST77XX_GREEN);
-      tft.println("OK");
-    } else {
-      tft.setTextColor(ST77XX_RED);
-      tft.println("FAIL");
-    }
-    tft.setTextColor(ST77XX_WHITE);
-    delay(1000);
+    if (ok) { tft.setTextColor(ST77XX_GREEN); tft.println("OK"); }
+    else { tft.setTextColor(ST77XX_RED); tft.println("FAIL"); }
+    tft.setTextColor(ST77XX_WHITE); delay(400);
   };
 
-  /* -------- The sensors are initialized right during the splash screen-------- */
-  tft.setCursor(10, 90);
-  
-  // 1. I2C и SCD30
   Wire.begin(I2C_SDA, I2C_SCL);
   scd30Detected = scd30.begin();
-  printStatus("SCD30", scd30Detected);
-
-  // 2. PMS5003
+  pSt("SCD30", scd30Detected);
+  
   PMS.begin(9600, SERIAL_8N1, PMS_RX, PMS_TX);
-  printStatus("PMS5003", true); // UART
+  pSt("PMS5003", true);
 
-  // 3.  WiFi
-  WiFi.softAP(AP_SSID, AP_PASS);
-  printStatus("WIFI AP", true);
+  // WIFI INIT
+  preferences.begin("wifi-conf", false);
+  String s = preferences.getString("ssid", ""), p = preferences.getString("pass", "");
+  m_en = preferences.getBool("m_en", false);
+  m_srv = preferences.getString("m_srv", "");
+  m_port = preferences.getInt("m_port", 1883);
+  m_user = preferences.getString("m_user", "");
+  m_pass = preferences.getString("m_pass", "");
 
-  // 4. Web server
+  tft.setCursor(10, tft.getCursorY()); tft.print(" > WiFi: ");
+  WiFi.mode(WIFI_AP_STA);
+  if (s != "") {
+    WiFi.begin(s.c_str(), p.c_str());
+    unsigned long st = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - st < WIFI_TIMEOUT) { delay(500); tft.print("."); }
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    tft.setTextColor(ST77XX_GREEN); tft.println(" OK");
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    if(m_en && m_srv != "") mqttClient.setServer(m_srv.c_str(), m_port);
+  } else {
+    tft.setTextColor(ST77XX_ORANGE); tft.println(" AP MODE");
+    WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID_DEF, AP_PASS_DEF);
+  }
+
+  // SERVER ROUTES
   server.on("/", [](){ server.send_P(200,"text/html",INDEX_HTML); });
   server.on("/status", [](){
-    String json="{";
-    json += "\"pm1\":"+String(pm1)+",";
-    json += "\"pm1lvl\":\""+pmLevel(pm1)+"\",";
-    json += "\"pm1clr\":\""+levelColor(pmLevel(pm1))+"\",";
-    json += "\"pm25\":"+String(pm25)+",";
-    json += "\"pm25lvl\":\""+pmLevel(pm25)+"\",";
-    json += "\"pm25clr\":\""+levelColor(pmLevel(pm25))+"\",";
-    json += "\"pm10\":"+String(pm10)+",";
-    json += "\"pm10lvl\":\""+pmLevel(pm10)+"\",";
-    json += "\"pm10clr\":\""+levelColor(pmLevel(pm10))+"\",";
-    json += "\"co2\":"+String(co2)+",";
-    json += "\"co2lvl\":\""+co2Level(co2)+"\",";
-    json += "\"co2clr\":\""+levelColor(co2Level(co2))+"\",";
-    json += "\"temp\":"+(isnan(temperature)?"null":String(temperature))+",";
-    json += "\"hum\":" +(isnan(humidity)?"null":String(humidity));
-    json += "}";
-    server.send(200,"application/json",json);
+    String mqSt = (!m_en) ? "OFF" : (mqttClient.connected() ? "OK" : "FAIL");
+    String j="{";
+    j += "\"co2\":"+String(co2)+",\"co2lvl\":\""+co2Level(co2)+"\",\"co2clr\":\""+levelColor(co2Level(co2))+"\",";
+    j += "\"pm1\":"+String(pm1)+",\"pm1lvl\":\""+pmLevel(pm1)+"\",\"pm1clr\":\""+levelColor(pmLevel(pm1))+"\",";
+    j += "\"pm25\":"+String(pm25)+",\"pm25lvl\":\""+pmLevel(pm25)+"\",\"pm25clr\":\""+levelColor(pmLevel(pm25))+"\",";
+    j += "\"pm10\":"+String(pm10)+",\"pm10lvl\":\""+pmLevel(pm10)+"\",\"pm10clr\":\""+levelColor(pmLevel(pm10))+"\",";
+    j += "\"temp\":"+(isnan(temperature)?"null":String(temperature,1))+",\"hum\":"+(isnan(humidity)?"null":String(humidity,0))+",";
+    j += "\"mq\":\""+mqSt+"\",\"m_en\":"+String(m_en)+",\"m_srv\":\""+m_srv+"\",\"m_port\":"+String(m_port)+",\"m_user\":\""+m_user+"\",";
+    j += "\"ssid\":\""+(WiFi.status()==WL_CONNECTED?WiFi.SSID():"AP-Mode")+"\",\"ip\":\""+(WiFi.status()==WL_CONNECTED?WiFi.localIP().toString():WiFi.softAPIP().toString())+"\"";
+    j += "}"; server.send(200,"application/json",j);
   });
+  server.on("/scan", [](){
+    int n = WiFi.scanNetworks(); String j = "[";
+    for (int i=0; i<n; i++) { j += "{\"ssid\":\""+WiFi.SSID(i)+"\",\"rssi\":"+String(WiFi.RSSI(i))+"}"; if (i<n-1) j += ","; }
+    j += "]"; server.send(200, "application/json", j);
+  });
+  server.on("/connect", HTTP_POST, [](){
+    if (server.arg("ssid").length() > 0) {
+      preferences.putString("ssid", server.arg("ssid"));
+      preferences.putString("pass", server.arg("pass"));
+    }
+    preferences.putBool("m_en", server.hasArg("m_en"));
+    preferences.putString("m_srv", server.arg("m_srv"));
+    preferences.putInt("m_port", server.arg("m_port").toInt());
+    preferences.putString("m_user", server.arg("m_user"));
+    preferences.putString("m_pass", server.arg("m_pass"));
+    server.send(200, "text/html", "Restarting..."); delay(2000); ESP.restart();
+  });
+  
   server.begin();
-  printStatus("SERVER", true);
-
-  // Final message
-  tft.setTextColor(ST77XX_CYAN);
-  tft.setCursor(15, 145);
-  tft.println("STARTING ENGINE...");
-  delay(1500);
-
-  tft.fillScreen(ST77XX_BLACK);
-  lastDisplay = millis(); // Progress bar timer reset
+  tft.setTextColor(ST77XX_CYAN); tft.setCursor(15, 145); tft.println("STARTING...");
+  delay(1000); tft.fillScreen(ST77XX_BLACK);
 }
 
 void loop() {
   server.handleClient();
-
-  /* -------- SCD30 -------- */
+  if (WiFi.status() == WL_CONNECTED && m_en) { reconnectMqtt(); mqttClient.loop(); }
   if (scd30Detected && scd30.dataReady()) {
-    scd30.read();
-    co2 = scd30.CO2;
-    temperature = scd30.temperature;
-    humidity = scd30.relative_humidity;
+    scd30.read(); co2 = scd30.CO2; temperature = scd30.temperature; humidity = scd30.relative_humidity;
   }
-
-  /* -------- PMS5003 -------- */
   readPMS();
 
-  /* -------- DATA COLLECTION LOGIC FOR THE GRAPH -------- */
+  if (m_en && mqttClient.connected() && millis() - lastMqtt >= 10000) {
+    lastMqtt = millis();
+    String p = "{\"co2\":"+String(co2,0)+",\"pm1\":"+String(pm1)+",\"pm25\":"+String(pm25)+",\"pm10\":"+String(pm10)+",\"t\":"+String(temperature,2)+",\"h\":"+String(humidity,0)+"}";
+    mqttClient.publish("air/status", p.c_str());
+  }
+
   if (millis() - lastGraphPoint >= graphInterval) {
     lastGraphPoint = millis();
-    
-    if (graphIdx < GRAPH_SAMPLES) {
-      co2History[graphIdx] = (int)co2;
-      graphIdx++;
-    } else {
-      for (int i = 0; i < GRAPH_SAMPLES - 1; i++) co2History[i] = co2History[i + 1];
-      co2History[GRAPH_SAMPLES - 1] = (int)co2;
-    }
+    if (graphIdx < GRAPH_SAMPLES) co2History[graphIdx++] = (int)co2;
+    else { for (int i=0; i<GRAPH_SAMPLES-1; i++) co2History[i] = co2History[i+1]; co2History[GRAPH_SAMPLES-1] = (int)co2; }
   }
 
-  /* -------- SERIAL OUTPUT & TEXT UPDATE -------- */
-  if (millis() - lastSerial >= 5000) {
-    lastSerial = millis();
-    lastDisplay = millis();
-
-    Serial.println("\n====== AQI MEASUREMENTS ======");
-
-    if (scd30Detected) {
-      Serial.printf("CO₂   : %.0f ppm [%s]\n", co2, co2Level(co2).c_str());
-      Serial.printf("Temp  : %.1f °C\n", temperature);
-      Serial.printf("Hum   : %.1f %%\n", humidity);
-    } else {
-      Serial.println("SCD30 : NOT DETECTED");
-    }
-
-    Serial.printf("PM1.0 : %u µg/m³ [%s]\n", pm1,  pmLevel(pm1).c_str());
-    Serial.printf("PM2.5 : %u µg/m³ [%s]\n", pm25, pmLevel(pm25).c_str());
-    Serial.printf("PM10  : %u µg/m³ [%s]\n", pm10, pmLevel(pm10).c_str());
-
-    Serial.println("================================");
-
-    //TEXT UPDATE
-    tft.setTextSize(1);
+  static unsigned long lCU = 0;
+  if (millis() - lCU >= 1000) {
+    lCU = millis(); struct tm ti;
     tft.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
-    tft.setCursor(30, 0);
-    tft.print("Air Quality");
-    
-    int yOffset = 25;
-
-    // --- CO2 ---
-    String co2Lvl = co2Level(co2);
-    uint16_t co2Clr = (co2Lvl == "Good") ? ST77XX_GREEN : (co2Lvl == "Moderate") ? ST77XX_ORANGE : ST77XX_RED;
-    
-    tft.setTextColor(co2Clr, ST77XX_BLACK); 
-    tft.setCursor(1, yOffset);
-    tft.printf("CO2: %.0f (%s)      ", co2, co2Lvl.c_str()); 
-    yOffset += 12;
-
-    // --- Rendering the graph (Simply drawing what has accumulated in the array) ---
-    drawCO2Graph(4, yOffset, 120, 30); 
-    yOffset += 35;
-
-
-    // --- Temp & Hum ---
-    tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
-    tft.setCursor(0, yOffset);
-    tft.printf("Temp: %.1f C   ", temperature);
-    yOffset += 12;
-    tft.setCursor(1, yOffset);
-    tft.printf("Hum:  %.1f %%   ", humidity);
-    yOffset += 20;
-
-    // --- PM1.0 ---
-    String pm1Lvl = pmLevel(pm1);
-    uint16_t pm1Clr = (pm1Lvl == "Good") ? ST77XX_GREEN : (pm1Lvl == "Moderate") ? ST77XX_ORANGE : ST77XX_RED;
-    tft.setTextColor(pm1Clr, ST77XX_BLACK);
-    tft.setCursor(1, yOffset);
-    tft.printf("PM1.0: %u (%s)          ", pm1, pm1Lvl.c_str());
-    yOffset += 16;
-
-    // --- PM2.5 ---
-    String pm25Lvl = pmLevel(pm25);
-    uint16_t pm25Clr = (pm25Lvl == "Good") ? ST77XX_GREEN : (pm25Lvl == "Moderate") ? ST77XX_ORANGE : ST77XX_RED;
-    tft.setTextColor(pm25Clr, ST77XX_BLACK);
-    tft.setCursor(1, yOffset);
-    tft.printf("PM2.5: %u (%s)          ", pm25, pm25Lvl.c_str());
-    yOffset += 16;
-
-    // --- PM10 ---
-    String pm10Lvl = pmLevel(pm10);
-    uint16_t pm10Clr = (pm10Lvl == "Good") ? ST77XX_GREEN : (pm10Lvl == "Moderate") ? ST77XX_ORANGE : ST77XX_RED;
-    tft.setTextColor(pm10Clr, ST77XX_BLACK);
-    tft.setCursor(1, yOffset);
-    tft.printf("PM10 : %u (%s)          ", pm10, pm10Lvl.c_str());
-  } 
-  // --- Progress bar ---
-  unsigned long timePassed = millis() - lastDisplay;
-  
-  if (timePassed <= 5000) {
-
-    int barWidth = map(timePassed, 0, 4900, 0, tft.width()); 
-    
-    if (barWidth > tft.width()) barWidth = tft.width();
-
-    tft.fillRect(0, tft.height() - 2, barWidth, 2, ST77XX_CYAN);
-    tft.fillRect(barWidth, tft.height() - 2, tft.width() - barWidth, 2, ST77XX_BLACK);
+    if(getLocalTime(&ti)) {
+      tft.setTextSize(2); tft.setCursor(10, 5); 
+      char timeStr[15]; strftime(timeStr, sizeof(timeStr), "%I:%M %p", &ti);
+      if (ti.tm_sec % 2 != 0) timeStr[2] = ' '; 
+      tft.print(timeStr);
+    }
   }
-  
+
+  if (millis() - lastSerial >= 5000) {
+    lastSerial = millis(); lastDisplay = millis();
+    int y = 32; tft.setTextSize(1);
+    
+    String cL = co2Level(co2); uint16_t cC = (cL=="Good")?ST77XX_GREEN:(cL=="Fair")?ST77XX_ORANGE:ST77XX_RED;
+    tft.setTextColor(cC, ST77XX_BLACK); tft.setCursor(1, y);
+    tft.printf("CO2: %.0f (%s)     ", co2, cL.c_str());
+    y += 12; drawCO2Graph(4, y, 120, 30); y += 35;
+    
+    tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK); tft.setCursor(0, y);
+    tft.printf("T:%.1fC H:%.0f%%  ", temperature, humidity); y += 15;
+    
+    auto dP = [&](const char* lbl, uint16_t v, int& yp) {
+      String l = pmLevel(v); uint16_t c = (l=="Good")?ST77XX_GREEN:(l=="Fair")?ST77XX_ORANGE:ST77XX_RED;
+      tft.setTextColor(c, ST77XX_BLACK); tft.setCursor(1, yp);
+      tft.printf("%s:%u ", lbl, v);
+      tft.setCursor(70, yp); tft.print(l + "    "); yp += 14;
+    };
+    dP("PM1.0", pm1, y); dP("PM2.5", pm25, y); dP("PM10 ", pm10, y);
+
+    tft.fillRect(0, tft.height() - 14, tft.width(), 12, ST77XX_BLACK);
+    tft.setCursor(1, tft.height() - 12);
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!m_en) { tft.setTextColor(ST77XX_YELLOW); tft.print("M:OFF"); }
+      else if (mqttClient.connected()) { tft.setTextColor(ST77XX_GREEN); tft.print("M:OK"); }
+      else { tft.setTextColor(ST77XX_RED); tft.print("M:ERR"); }
+      tft.setTextColor(0x7BEF); tft.print(" "); tft.print(WiFi.localIP().toString());
+    } else {
+      tft.setTextColor(ST77XX_ORANGE); tft.print("AP: 192.168.4.1");
+    }
+  }
+
+  unsigned long tp = millis() - lastDisplay;
+  if (tp <= 5000) {
+    int bw = map(tp, 0, 4900, 0, tft.width());
+    tft.fillRect(0, tft.height()-2, bw, 2, ST77XX_CYAN);
+    tft.fillRect(bw, tft.height()-2, tft.width()-bw, 2, ST77XX_BLACK);
+  }
 }
