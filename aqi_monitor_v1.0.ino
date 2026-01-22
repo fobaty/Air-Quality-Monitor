@@ -20,6 +20,7 @@
 const char* AP_SSID_DEF = "AIR-SCAN-CONFIG";
 const char* AP_PASS_DEF = "12345678";
 const int WIFI_TIMEOUT = 10000;
+const int MAX_WIFI_NETWORKS = 5;
 
 const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = -28800;    
@@ -52,14 +53,14 @@ int m_port;
 bool m_en = false;
 
 bool scd30Detected = false;
-float co2 = NAN, temperature = NAN, humidity = NAN;
+float co2 = 0, temperature = 0, humidity = 0;
 uint16_t pm1 = 0, pm25 = 0, pm10 = 0;
-unsigned long lastSerial = 0, lastDisplay = 0, lastMqtt = 0, lastMqttRetry = 0;
+unsigned long lastDisplayUpdate = 0; 
+unsigned long lastMqtt = 0, lastMqttRetry = 0, lastGraphPoint = 0, lastClockUpdate = 0;
 
 #define GRAPH_SAMPLES 60 
 int co2History[GRAPH_SAMPLES];
 int graphIdx = 0;
-unsigned long lastGraphPoint = 0;
 unsigned long graphInterval = 30000;
 
 /* ===== HELPERS ===== */
@@ -80,6 +81,49 @@ String levelColor(String lvl) {
   if (lvl == "Fair") return "orange";
   if (lvl == "Poor" || lvl == "Bad") return "red";
   return "darkred";
+}
+
+/* ================= MULTI-WIFI LOGIC ================= */
+void saveWiFi(String ssid, String pass) {
+  if (ssid == "") return;
+  preferences.begin("wifi-list", false);
+  
+  // Shift existing networks
+  for (int i = MAX_WIFI_NETWORKS - 1; i > 0; i--) {
+    String s = preferences.getString(("s" + String(i-1)).c_str(), "");
+    String p = preferences.getString(("p" + String(i-1)).c_str(), "");
+    if (s != "") {
+      preferences.putString(("s" + String(i)).c_str(), s);
+      preferences.putString(("p" + String(i)).c_str(), p);
+    }
+  }
+  // Save new as first
+  preferences.putString("s0", ssid);
+  preferences.putString("p0", pass);
+  preferences.end();
+}
+
+bool connectToStoredWiFi() {
+  preferences.begin("wifi-list", true);
+  for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+    String s = preferences.getString(("s" + String(i)).c_str(), "");
+    String p = preferences.getString(("p" + String(i)).c_str(), "");
+    if (s == "") continue;
+
+    tft.printf("\nTrying: %s", s.c_str());
+    WiFi.begin(s.c_str(), p.c_str());
+    
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT) {
+      delay(500); tft.print(".");
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      preferences.end();
+      return true;
+    }
+  }
+  preferences.end();
+  return false;
 }
 
 /* ================= WEB UI ================= */
@@ -111,14 +155,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
  <button class="btn" style="background:#2196f3" onclick="scan()">📡 Scan WiFi</button>
  <div id="scan-res"></div>
  <form action="/connect" method="POST">
-  <label>WiFi SSID:</label><input name="ssid" id="ssid" placeholder="Keep empty to stay">
+  <label>WiFi SSID:</label><input name="ssid" id="ssid" placeholder="New Network SSID">
   <label>WiFi Password:</label><input name="pass" type="password">
   <hr>
   <label><input type="checkbox" name="m_en" id="m_en" style="width:auto"> Enable MQTT</label>
-  <label>Broker IP:</label><input name="m_srv" id="m_srv">
-  <label>Port:</label><input name="m_port" id="m_port" type="number">
-  <label>User:</label><input name="m_user" id="m_user">
-  <label>Pass:</label><input name="m_pass" id="m_pass" type="password">
+  <label>Broker IP:</label><input name="m_srv" id="m_srv" placeholder="Current: Saved">
+  <label>Port:</label><input name="m_port" id="m_port" type="number" placeholder="1883">
+  <label>User:</label><input name="m_user" id="m_user" placeholder="Leave empty to keep">
+  <label>Pass:</label><input name="m_pass" id="m_pass" type="password" placeholder="Leave empty to keep">
   <button type="submit" class="btn" style="background:#4caf50">Save & Restart</button>
  </form>
  <button class="btn" style="background:none;color:#888" onclick="sh('main-view')">← Back</button>
@@ -132,8 +176,7 @@ function update(){
   uB("p25-b", d.pm25, d.pm25lvl, d.pm25clr, "PM2.5"); uB("p10-b", d.pm10, d.pm10lvl, d.pm10clr, "PM10");
   document.getElementById("t-v").innerText = d.temp?? "--"; document.getElementById("h-v").innerText = d.hum?? "--";
   if(!window.f){
-    document.getElementById("m_en").checked = d.m_en; document.getElementById("m_srv").value = d.m_srv||"";
-    document.getElementById("m_port").value = d.m_port||1883; document.getElementById("m_user").value = d.m_user||"";
+    document.getElementById("m_en").checked = d.m_en;
     window.f=true;
   }
  });
@@ -156,12 +199,13 @@ void reconnectMqtt() {
   }
 }
 
-bool readPMS() {
-  if (PMS.available() < 32) return false;
-  if (PMS.read() != 0x42 || PMS.read() != 0x4D) return false;
-  uint8_t buf[30]; PMS.readBytes(buf, 30);
-  pm1 = buf[8]<<8|buf[9]; pm25 = buf[10]<<8|buf[11]; pm10 = buf[12]<<8|buf[13];
-  return true;
+void readPMS() {
+  while (PMS.available() >= 32) {
+    if (PMS.read() == 0x42 && PMS.read() == 0x4D) {
+      uint8_t buf[30]; PMS.readBytes(buf, 30);
+      pm1 = buf[8]<<8|buf[9]; pm25 = buf[10]<<8|buf[11]; pm10 = buf[12]<<8|buf[13];
+    }
+  }
 }
 
 void drawCO2Graph(int x, int y, int w, int h) {
@@ -185,7 +229,6 @@ void setup() {
   spiTFT.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
   tft.initR(INITR_GREENTAB); tft.setRotation(0); tft.fillScreen(ST77XX_BLACK);
 
-  // --- SPLASH SCREEN ---
   tft.drawRoundRect(5, 5, tft.width()-10, 45, 8, ST77XX_CYAN);
   tft.setTextSize(2); tft.setCursor(20, 15); tft.setTextColor(ST77XX_CYAN); tft.print("AIR SCAN");
   tft.setTextSize(1); tft.setTextColor(ST77XX_WHITE);
@@ -206,33 +249,27 @@ void setup() {
   PMS.begin(9600, SERIAL_8N1, PMS_RX, PMS_TX);
   pSt("PMS5003", true);
 
-  // WIFI INIT
-  preferences.begin("wifi-conf", false);
-  String s = preferences.getString("ssid", ""), p = preferences.getString("pass", "");
+  // Load MQTT Settings
+  preferences.begin("mqtt-conf", true);
   m_en = preferences.getBool("m_en", false);
   m_srv = preferences.getString("m_srv", "");
   m_port = preferences.getInt("m_port", 1883);
   m_user = preferences.getString("m_user", "");
   m_pass = preferences.getString("m_pass", "");
+  preferences.end();
 
   tft.setCursor(10, tft.getCursorY()); tft.print(" > WiFi: ");
-  WiFi.mode(WIFI_AP_STA);
-  if (s != "") {
-    WiFi.begin(s.c_str(), p.c_str());
-    unsigned long st = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - st < WIFI_TIMEOUT) { delay(500); tft.print("."); }
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    tft.setTextColor(ST77XX_GREEN); tft.println(" OK");
+  WiFi.mode(WIFI_STA);
+  
+  if (connectToStoredWiFi()) {
+    tft.setTextColor(ST77XX_GREEN); tft.println("\nCONNECTED");
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     if(m_en && m_srv != "") mqttClient.setServer(m_srv.c_str(), m_port);
   } else {
-    tft.setTextColor(ST77XX_ORANGE); tft.println(" AP MODE");
+    tft.setTextColor(ST77XX_ORANGE); tft.println("\nAP MODE ACTIVE");
     WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID_DEF, AP_PASS_DEF);
   }
 
-  // SERVER ROUTES
   server.on("/", [](){ server.send_P(200,"text/html",INDEX_HTML); });
   server.on("/status", [](){
     String mqSt = (!m_en) ? "OFF" : (mqttClient.connected() ? "OK" : "FAIL");
@@ -242,7 +279,7 @@ void setup() {
     j += "\"pm25\":"+String(pm25)+",\"pm25lvl\":\""+pmLevel(pm25)+"\",\"pm25clr\":\""+levelColor(pmLevel(pm25))+"\",";
     j += "\"pm10\":"+String(pm10)+",\"pm10lvl\":\""+pmLevel(pm10)+"\",\"pm10clr\":\""+levelColor(pmLevel(pm10))+"\",";
     j += "\"temp\":"+(isnan(temperature)?"null":String(temperature,1))+",\"hum\":"+(isnan(humidity)?"null":String(humidity,0))+",";
-    j += "\"mq\":\""+mqSt+"\",\"m_en\":"+String(m_en)+",\"m_srv\":\""+m_srv+"\",\"m_port\":"+String(m_port)+",\"m_user\":\""+m_user+"\",";
+    j += "\"mq\":\""+mqSt+"\",\"m_en\":"+String(m_en)+",";
     j += "\"ssid\":\""+(WiFi.status()==WL_CONNECTED?WiFi.SSID():"AP-Mode")+"\",\"ip\":\""+(WiFi.status()==WL_CONNECTED?WiFi.localIP().toString():WiFi.softAPIP().toString())+"\"";
     j += "}"; server.send(200,"application/json",j);
   });
@@ -252,35 +289,45 @@ void setup() {
     j += "]"; server.send(200, "application/json", j);
   });
   server.on("/connect", HTTP_POST, [](){
+    // Save WiFi if provided
     if (server.arg("ssid").length() > 0) {
-      preferences.putString("ssid", server.arg("ssid"));
-      preferences.putString("pass", server.arg("pass"));
+      saveWiFi(server.arg("ssid"), server.arg("pass"));
     }
+
+    // Save MQTT Settings only if fields are NOT empty
+    preferences.begin("mqtt-conf", false);
     preferences.putBool("m_en", server.hasArg("m_en"));
-    preferences.putString("m_srv", server.arg("m_srv"));
-    preferences.putInt("m_port", server.arg("m_port").toInt());
-    preferences.putString("m_user", server.arg("m_user"));
-    preferences.putString("m_pass", server.arg("m_pass"));
-    server.send(200, "text/html", "Restarting..."); delay(2000); ESP.restart();
+    if (server.arg("m_srv").length() > 0) preferences.putString("m_srv", server.arg("m_srv"));
+    if (server.arg("m_port").length() > 0) preferences.putInt("m_port", server.arg("m_port").toInt());
+    if (server.arg("m_user").length() > 0) preferences.putString("m_user", server.arg("m_user"));
+    if (server.arg("m_pass").length() > 0) preferences.putString("m_pass", server.arg("m_pass"));
+    preferences.end();
+
+    server.send(200, "text/html", "Settings Saved. Restarting..."); delay(2000); ESP.restart();
   });
   
   server.begin();
   tft.setTextColor(ST77XX_CYAN); tft.setCursor(15, 145); tft.println("STARTING...");
   delay(1000); tft.fillScreen(ST77XX_BLACK);
+  lastDisplayUpdate = millis(); 
 }
 
 void loop() {
   server.handleClient();
-  if (WiFi.status() == WL_CONNECTED && m_en) { reconnectMqtt(); mqttClient.loop(); }
+  
   if (scd30Detected && scd30.dataReady()) {
     scd30.read(); co2 = scd30.CO2; temperature = scd30.temperature; humidity = scd30.relative_humidity;
   }
   readPMS();
 
-  if (m_en && mqttClient.connected() && millis() - lastMqtt >= 10000) {
-    lastMqtt = millis();
-    String p = "{\"co2\":"+String(co2,0)+",\"pm1\":"+String(pm1)+",\"pm25\":"+String(pm25)+",\"pm10\":"+String(pm10)+",\"t\":"+String(temperature,2)+",\"h\":"+String(humidity,0)+"}";
-    mqttClient.publish("air/status", p.c_str());
+  if (WiFi.status() == WL_CONNECTED && m_en) { 
+    reconnectMqtt(); 
+    mqttClient.loop(); 
+    if (mqttClient.connected() && millis() - lastMqtt >= 10000) {
+      lastMqtt = millis();
+      String p = "{\"co2\":"+String(co2,0)+",\"pm1\":"+String(pm1)+",\"pm25\":"+String(pm25)+",\"pm10\":"+String(pm10)+",\"t\":"+String(temperature,2)+",\"h\":"+String(humidity,0)+"}";
+      mqttClient.publish("air/status", p.c_str());
+    }
   }
 
   if (millis() - lastGraphPoint >= graphInterval) {
@@ -289,20 +336,19 @@ void loop() {
     else { for (int i=0; i<GRAPH_SAMPLES-1; i++) co2History[i] = co2History[i+1]; co2History[GRAPH_SAMPLES-1] = (int)co2; }
   }
 
-  static unsigned long lCU = 0;
-  if (millis() - lCU >= 1000) {
-    lCU = millis(); struct tm ti;
+  if (millis() - lastClockUpdate >= 1000) {
+    lastClockUpdate = millis(); struct tm ti;
     tft.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
-    if(getLocalTime(&ti)) {
-      tft.setTextSize(2); tft.setCursor(10, 5); 
+    tft.setTextSize(2); tft.setCursor(10, 5);
+    if(WiFi.status() == WL_CONNECTED && getLocalTime(&ti)) {
       char timeStr[15]; strftime(timeStr, sizeof(timeStr), "%I:%M %p", &ti);
       if (ti.tm_sec % 2 != 0) timeStr[2] = ' '; 
       tft.print(timeStr);
-    }
+    } else { tft.print("00:00 AM"); }
   }
 
-  if (millis() - lastSerial >= 5000) {
-    lastSerial = millis(); lastDisplay = millis();
+  if (millis() - lastDisplayUpdate >= 5000) {
+    lastDisplayUpdate = millis(); 
     int y = 32; tft.setTextSize(1);
     
     String cL = co2Level(co2); uint16_t cC = (cL=="Good")?ST77XX_GREEN:(cL=="Fair")?ST77XX_ORANGE:ST77XX_RED;
@@ -324,19 +370,18 @@ void loop() {
     tft.fillRect(0, tft.height() - 14, tft.width(), 12, ST77XX_BLACK);
     tft.setCursor(1, tft.height() - 12);
     if (WiFi.status() == WL_CONNECTED) {
-      if (!m_en) { tft.setTextColor(ST77XX_YELLOW); tft.print("M:OFF"); }
-      else if (mqttClient.connected()) { tft.setTextColor(ST77XX_GREEN); tft.print("M:OK"); }
-      else { tft.setTextColor(ST77XX_RED); tft.print("M:ERR"); }
+      tft.setTextColor(m_en && mqttClient.connected() ? ST77XX_GREEN : (m_en ? ST77XX_RED : ST77XX_YELLOW));
+      tft.print(m_en ? (mqttClient.connected() ? "M:OK" : "M:ERR") : "M:OFF");
       tft.setTextColor(0x7BEF); tft.print(" "); tft.print(WiFi.localIP().toString());
     } else {
       tft.setTextColor(ST77XX_ORANGE); tft.print("AP: 192.168.4.1");
     }
   }
 
-  unsigned long tp = millis() - lastDisplay;
-  if (tp <= 5000) {
-    int bw = map(tp, 0, 4900, 0, tft.width());
-    tft.fillRect(0, tft.height()-2, bw, 2, ST77XX_CYAN);
-    tft.fillRect(bw, tft.height()-2, tft.width()-bw, 2, ST77XX_BLACK);
+  unsigned long elapsed = millis() - lastDisplayUpdate;
+  if (elapsed <= 5000) {
+    int barWidth = (elapsed * tft.width()) / 5000;
+    tft.fillRect(0, tft.height() - 2, barWidth, 2, ST77XX_CYAN);
+    tft.fillRect(barWidth, tft.height() - 2, tft.width() - barWidth, 2, ST77XX_BLACK);
   }
 }
