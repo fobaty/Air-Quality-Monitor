@@ -48,7 +48,7 @@ The device uses universal color-coding for both the Web UI and the TFT Display:
 
 ## ⚙️ Configuration & Setup
 
-1. **Upload**: Flash the provided `.ino` sketch to your ESP32-S3.
+1. **Upload**: Flash the provided `air_quality_monitor.ino` sketch to your ESP32-S3.
 2. **First Boot**: The device will create a Wi-Fi network: `AIR-SCAN-CONFIG` (Pass: `12345678`).
 3. **Web Portal**: Connect your phone/PC to this network and go to `http://192.168.4.1`.
 4. **Settings**: 
