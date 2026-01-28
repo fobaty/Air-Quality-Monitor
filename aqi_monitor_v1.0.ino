@@ -1,7 +1,7 @@
 /*
   Air Quality Monitor
   GitHub: https://github.com/fobaty/Air-Quality-Monitor
-  Version: 1.0
+  Version: 1.10
   Glory to Ukraine!
 */
 
@@ -50,7 +50,6 @@ String m_srv, m_user, m_pass;
 int m_port;
 bool m_en = false;
 
-// Dynamic time settings
 long gmtOffset_sec = 0;    
 int daylightOffset_sec = 0; 
 
@@ -116,15 +115,19 @@ bool connectToStoredWiFi() {
     String p = preferences.getString(("p" + String(i)).c_str(), "");
     if (s == "" || s.length() < 1) continue;
     tft.printf("\nTrying [%d]: %s", i+1, s.c_str());
+    
+    // Reset Wi-Fi before each new attempt
     WiFi.disconnect(true);
     WiFi.mode(WIFI_STA);
-    delay(500); 
+    delay(100); 
+    
     WiFi.begin(s.c_str(), p.c_str());
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT) {
       delay(500); tft.print(".");
     }
     if (WiFi.status() == WL_CONNECTED) {
+      WiFi.setAutoReconnect(true); // Allow auto-connection only if the network is found
       preferences.end();
       saveWiFi(s, p); 
       return true;
@@ -287,7 +290,9 @@ void setup() {
     if(m_en && m_srv != "") mqttClient.setServer(m_srv.c_str(), m_port);
   } else {
     tft.setTextColor(ST77XX_ORANGE); tft.println("\nAP MODE ACTIVE");
-    WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID_DEF, AP_PASS_DEF);
+    WiFi.mode(WIFI_AP_STA); // Using hybrid mode for scanning
+    WiFi.softAP(AP_SSID_DEF, AP_PASS_DEF);
+    WiFi.setAutoReconnect(false); // DISABLE background connection attempts in AP mode
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   }
 
@@ -309,11 +314,16 @@ void setup() {
     j += "\"ssid\":\""+(WiFi.status()==WL_CONNECTED?WiFi.SSID():"AP-Mode")+"\",\"ip\":\""+(WiFi.status()==WL_CONNECTED?WiFi.localIP().toString():WiFi.softAPIP().toString())+"\"";
     j += "}"; server.send(200,"application/json",j);
   });
+  
   server.on("/scan", [](){
-    int n = WiFi.scanNetworks(); String j = "[";
+    // Clearing old scan results before a new one
+    WiFi.scanDelete(); 
+    int n = WiFi.scanNetworks(false, false, false, 150); // Accelerated scanning
+    String j = "[";
     for (int i=0; i<n; i++) { j += "{\"ssid\":\""+WiFi.SSID(i)+"\",\"rssi\":"+String(WiFi.RSSI(i))+"}"; if (i<n-1) j += ","; }
     j += "]"; server.send(200, "application/json", j);
   });
+
   server.on("/connect", HTTP_POST, [](){
     if (server.arg("ssid").length() > 0) saveWiFi(server.arg("ssid"), server.arg("pass"));
     preferences.begin("mqtt-conf", false);
@@ -322,12 +332,12 @@ void setup() {
     if (server.arg("m_port").length() > 0) preferences.putInt("m_port", server.arg("m_port").toInt());
     if (server.arg("m_user").length() > 0) preferences.putString("m_user", server.arg("m_user"));
     if (server.arg("m_pass").length() > 0) preferences.putString("m_pass", server.arg("m_pass"));
-    // Saving time
     if (server.hasArg("gmt_h")) preferences.putLong("gmt_off", server.arg("gmt_h").toInt() * 3600);
     if (server.hasArg("dst_en")) preferences.putInt("dst_off", server.arg("dst_en").toInt());
     preferences.end();
-    server.send(200, "text/html", "Restarting..."); delay(2000); ESP.restart();
+    server.send(200, "text/html", "Restarting..."); delay(1000); ESP.restart();
   });
+  
   server.begin();
   delay(1000); tft.fillScreen(ST77XX_BLACK);
   lastDisplayUpdate = millis(); 
@@ -353,7 +363,7 @@ void loop() {
     else { for (int i=0; i<GRAPH_SAMPLES-1; i++) co2History[i] = co2History[i+1]; co2History[GRAPH_SAMPLES-1] = (int)co2; }
   }
 
-  // --- CLOCK & UPTIME (AUTONOMOUS) ---
+  // --- CLOCK & UPTIME ---
   if (millis() - lastClockUpdate >= 1000) {
     lastClockUpdate = millis(); struct tm ti;
     bool timeValid = getLocalTime(&ti);
@@ -362,17 +372,13 @@ void loop() {
     if (timeValid != lastWasTime) { tft.fillRect(0, 0, tft.width(), 32, ST77XX_BLACK); lastWasTime = timeValid; }
 
     tft.setCursor(10, 5);
-    if(timeValid && ti.tm_year > 100) { // If the time has been obtained and it is correct (not 1970)
+    if(timeValid && ti.tm_year > 100) { 
       tft.setTextSize(2); tft.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
       char timeStr[15]; strftime(timeStr, sizeof(timeStr), "%I:%M %p", &ti);
       if (ti.tm_sec % 2 != 0) timeStr[2] = ' '; tft.print(timeStr);
-      
-      // AUTONOMY INDICATION: an orange dot if there is no Wi-Fi, but the clock is running.
       if (!wifiOk) tft.fillCircle(120, 8, 2, ST77XX_ORANGE); 
       else tft.fillCircle(120, 8, 2, ST77XX_BLACK);
-
     } else { 
-      // If the time has not yet been synchronized.
       tft.setTextSize(1); tft.setTextColor(0x7BEF, ST77XX_BLACK); tft.print("UPTIME ");
       long s = millis() / 1000; int h = s / 3600; int m = (s % 3600) / 60; int sec = s % 60;
       tft.setTextSize(2); tft.setCursor(10, 15); tft.printf("%02d:%02d", h, m);
