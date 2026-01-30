@@ -26,8 +26,8 @@ A professional-grade **Air Quality Monitor** based on the **ESP32-S3**, featurin
   - **Fallback AP Mode: Automatically enters Access Point mode if no saved Wi-Fi is available.
 
 - **Reliability**:
-- **Non-Volatile Memory: All settings are securely saved in ESP32 Flash (Preferences).
-- **Internal RTC Persistence: Enhanced time-keeping stability without constant internet polling.
+  - **Non-Volatile Memory: All settings are securely saved in ESP32 Flash (Preferences).
+  - **Internal RTC Persistence: Enhanced time-keeping stability without constant internet polling.
   
 
 ![Air Quality Monitor](air-quality-monitor.jpeg)
