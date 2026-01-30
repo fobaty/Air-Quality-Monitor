@@ -1,7 +1,7 @@
 /*
   Air Quality Monitor
   GitHub: https://github.com/fobaty/Air-Quality-Monitor
-  Version: 1.10
+  Version: 1.12 (Internal RTC Persistence)
   Glory to Ukraine!
 */
 
@@ -116,10 +116,9 @@ bool connectToStoredWiFi() {
     if (s == "" || s.length() < 1) continue;
     tft.printf("\nTrying [%d]: %s", i+1, s.c_str());
     
-    // Reset Wi-Fi before each new attempt
     WiFi.disconnect(true);
     WiFi.mode(WIFI_STA);
-    delay(100); 
+    delay(500); 
     
     WiFi.begin(s.c_str(), p.c_str());
     unsigned long start = millis();
@@ -127,7 +126,6 @@ bool connectToStoredWiFi() {
       delay(500); tft.print(".");
     }
     if (WiFi.status() == WL_CONNECTED) {
-      WiFi.setAutoReconnect(true); // Allow auto-connection only if the network is found
       preferences.end();
       saveWiFi(s, p); 
       return true;
@@ -227,8 +225,11 @@ void reconnectMqtt() {
 void readPMS() {
   while (PMS.available() >= 32) {
     if (PMS.read() == 0x42 && PMS.read() == 0x4D) {
-      uint8_t buf[30]; PMS.readBytes(buf, 30);
-      pm1 = buf[8]<<8|buf[9]; pm25 = buf[10]<<8|buf[11]; pm10 = buf[12]<<8|buf[13];
+      uint8_t buf[30]; 
+      PMS.readBytes(buf, 30);
+      pm1 = buf[8]<<8|buf[9]; 
+      pm25 = buf[10]<<8|buf[11]; 
+      pm10 = buf[12]<<8|buf[13];
     }
   }
 }
@@ -254,8 +255,10 @@ void setup() {
   spiTFT.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
   tft.initR(INITR_GREENTAB); tft.setRotation(0); tft.fillScreen(ST77XX_BLACK);
 
+  // Splash Screen
   tft.drawRoundRect(5, 5, tft.width()-10, 45, 8, ST77XX_CYAN);
   tft.setTextSize(2); tft.setCursor(20, 15); tft.setTextColor(ST77XX_CYAN); tft.print("AIR SCAN");
+  tft.setTextSize(1); tft.setCursor(45, 35); tft.print("V1.12");
   tft.setTextSize(1); tft.setTextColor(ST77XX_WHITE);
   tft.setCursor(10, 70); tft.println("SYSTEM CHECK:");
 
@@ -273,6 +276,7 @@ void setup() {
   PMS.begin(9600, SERIAL_8N1, PMS_RX, PMS_TX);
   pSt("PMS5003", true);
 
+  // Load Settings
   preferences.begin("mqtt-conf", true);
   m_en = preferences.getBool("m_en", false);
   m_srv = preferences.getString("m_srv", "");
@@ -290,17 +294,19 @@ void setup() {
     if(m_en && m_srv != "") mqttClient.setServer(m_srv.c_str(), m_port);
   } else {
     tft.setTextColor(ST77XX_ORANGE); tft.println("\nAP MODE ACTIVE");
-    WiFi.mode(WIFI_AP_STA); // Using hybrid mode for scanning
+    WiFi.mode(WIFI_AP_STA); 
     WiFi.softAP(AP_SSID_DEF, AP_PASS_DEF);
-    WiFi.setAutoReconnect(false); // DISABLE background connection attempts in AP mode
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   }
 
+  /* --- Web Server Routes --- */
   server.on("/", [](){ server.send_P(200,"text/html",INDEX_HTML); });
+  
   server.on("/clearwifi", [](){
     preferences.begin("wifi-list", false); preferences.clear(); preferences.end();
     server.send(200, "text/html", "Erased. Restarting..."); delay(2000); ESP.restart();
   });
+  
   server.on("/status", [](){
     String mqSt = (!m_en) ? "OFF" : (mqttClient.connected() ? "OK" : "FAIL");
     String j="{";
@@ -316,14 +322,12 @@ void setup() {
   });
   
   server.on("/scan", [](){
-    // Clearing old scan results before a new one
-    WiFi.scanDelete(); 
-    int n = WiFi.scanNetworks(false, false, false, 150); // Accelerated scanning
+    int n = WiFi.scanNetworks(); 
     String j = "[";
     for (int i=0; i<n; i++) { j += "{\"ssid\":\""+WiFi.SSID(i)+"\",\"rssi\":"+String(WiFi.RSSI(i))+"}"; if (i<n-1) j += ","; }
     j += "]"; server.send(200, "application/json", j);
   });
-
+  
   server.on("/connect", HTTP_POST, [](){
     if (server.arg("ssid").length() > 0) saveWiFi(server.arg("ssid"), server.arg("pass"));
     preferences.begin("mqtt-conf", false);
@@ -335,9 +339,9 @@ void setup() {
     if (server.hasArg("gmt_h")) preferences.putLong("gmt_off", server.arg("gmt_h").toInt() * 3600);
     if (server.hasArg("dst_en")) preferences.putInt("dst_off", server.arg("dst_en").toInt());
     preferences.end();
-    server.send(200, "text/html", "Restarting..."); delay(1000); ESP.restart();
+    server.send(200, "text/html", "Restarting..."); delay(2000); ESP.restart();
   });
-  
+
   server.begin();
   delay(1000); tft.fillScreen(ST77XX_BLACK);
   lastDisplayUpdate = millis(); 
@@ -345,11 +349,19 @@ void setup() {
 
 void loop() {
   server.handleClient();
-  if (scd30Detected && scd30.dataReady()) { scd30.read(); co2 = scd30.CO2; temperature = scd30.temperature; humidity = scd30.relative_humidity; }
+  
+  if (scd30Detected && scd30.dataReady()) { 
+    scd30.read(); 
+    co2 = scd30.CO2; 
+    temperature = scd30.temperature; 
+    humidity = scd30.relative_humidity; 
+  }
   readPMS();
 
+  // MQTT logic
   if (WiFi.status() == WL_CONNECTED && m_en) { 
-    reconnectMqtt(); mqttClient.loop(); 
+    reconnectMqtt(); 
+    mqttClient.loop(); 
     if (mqttClient.connected() && millis() - lastMqtt >= 10000) {
       lastMqtt = millis();
       String p = "{\"co2\":"+String(co2,0)+",\"pm1\":"+String(pm1)+",\"pm25\":"+String(pm25)+",\"pm10\":"+String(pm10)+",\"t\":"+String(temperature,2)+",\"h\":"+String(humidity,0)+"}";
@@ -357,28 +369,41 @@ void loop() {
     }
   }
 
+  // Graph history update
   if (millis() - lastGraphPoint >= graphInterval) {
     lastGraphPoint = millis();
     if (graphIdx < GRAPH_SAMPLES) co2History[graphIdx++] = (int)co2;
     else { for (int i=0; i<GRAPH_SAMPLES-1; i++) co2History[i] = co2History[i+1]; co2History[GRAPH_SAMPLES-1] = (int)co2; }
   }
 
-  // --- CLOCK & UPTIME ---
+  // --- CLOCK & UPTIME (IMPROVED RTC PERSISTENCE) ---
   if (millis() - lastClockUpdate >= 1000) {
-    lastClockUpdate = millis(); struct tm ti;
-    bool timeValid = getLocalTime(&ti);
-    bool wifiOk = (WiFi.status() == WL_CONNECTED);
+    lastClockUpdate = millis(); 
+    struct tm ti;
+    // getLocalTime works even if WiFi is gone, provided time was set once
+    bool hasTime = getLocalTime(&ti);
     
+    // Logic: If year is > 100, it means RTC was synchronized at least once
+    bool timeValid = (hasTime && ti.tm_year > 100);
+    
+    // Switch UI area if mode changes
     if (timeValid != lastWasTime) { tft.fillRect(0, 0, tft.width(), 32, ST77XX_BLACK); lastWasTime = timeValid; }
 
     tft.setCursor(10, 5);
-    if(timeValid && ti.tm_year > 100) { 
+    if(timeValid) {
       tft.setTextSize(2); tft.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
       char timeStr[15]; strftime(timeStr, sizeof(timeStr), "%I:%M %p", &ti);
-      if (ti.tm_sec % 2 != 0) timeStr[2] = ' '; tft.print(timeStr);
-      if (!wifiOk) tft.fillCircle(120, 8, 2, ST77XX_ORANGE); 
-      else tft.fillCircle(120, 8, 2, ST77XX_BLACK);
+      if (ti.tm_sec % 2 != 0) timeStr[2] = ' '; // Blinking colon
+      tft.print(timeStr);
+      
+      // Indicators for status
+      if (WiFi.status() != WL_CONNECTED) {
+        tft.fillCircle(120, 8, 2, ST77XX_ORANGE); // Show orange dot if offline but clock works
+      } else {
+        tft.fillCircle(120, 8, 2, ST77XX_BLACK); // Clear dot if online
+      }
     } else { 
+      // Fallback to Uptime if time was never synced
       tft.setTextSize(1); tft.setTextColor(0x7BEF, ST77XX_BLACK); tft.print("UPTIME ");
       long s = millis() / 1000; int h = s / 3600; int m = (s % 3600) / 60; int sec = s % 60;
       tft.setTextSize(2); tft.setCursor(10, 15); tft.printf("%02d:%02d", h, m);
@@ -411,7 +436,7 @@ void loop() {
     } else { tft.setTextColor(ST77XX_ORANGE); tft.print("AP: 192.168.4.1"); }
   }
 
-  // --- PROGRESS BAR ---
+  // --- PROGRESS BAR  ---
   unsigned long elapsed = millis() - lastDisplayUpdate;
   if (elapsed <= 5000) {
     int bw = (elapsed * tft.width()) / 5000;
