@@ -5,18 +5,30 @@ A professional-grade **Air Quality Monitor** based on the **ESP32-S3**, featurin
 ---
 
 ## 🚀 Features
-
 - **Dual-Sensor Monitoring**:
   - **CO₂, Temperature, and Humidity**: via Sensirion **SCD30** (NDIR technology).
   - **PM1.0, PM2.5, PM10**: via Plantower **PMS5003** (Laser scattering).
-- **MQTT Integration**: Stream real-time data to Home Assistant, OpenHAB, or Node-RED in JSON format.
-- **Web-Based Settings Manager**: No need to hardcode credentials. Change Wi-Fi or MQTT settings on the fly via the browser.
-- **Non-Volatile Memory**: All settings are securely saved in ESP32 Flash memory (`Preferences`).
-- **Advanced Display (ST7735)**:
-  - **Real-time CO₂ Graph**: 30-minute visual history.
-  - **System Diagnostics**: Splash screen showing sensor status on boot.
-  - **Smart Status Bar**: Compact display of local IP and MQTT connectivity.
-- **Smart Connectivity**: Automatically enters **Access Point (AP) mode** if the saved Wi-Fi is unavailable.
+
+- **Advanced Display UI (ST7735)**:
+  - **Real-time CO₂ Graph: 30-minute visual history with auto-scaling.
+  - **Persistent Clock: Smart RTC logic that keeps showing time even if Wi-Fi connection is lost (after initial sync).
+  - **Smooth Progress Bar: Visual indicator of data refresh cycles.
+  - **System Diagnostics: Detailed splash screen showing sensor and network health on boot.
+
+- **Web-Based Settings Manager**:
+  - **On-the-fly Config: Change Wi-Fi, MQTT details, GMT offset, and DST settings via browser.
+  - **Built-in WiFi Scanner: Easily find and connect to networks through the web UI.
+
+- **MQTT Integration: Stream real-time data to Home Assistant, OpenHAB, or Node-RED in JSON format with status indicators (M:OK / M:ERR)**.
+
+- **Smart Connectivity**:
+  - **Multi-WiFi Support: Remembers and automatically connects to up to 5 saved networks.
+  - **Fallback AP Mode: Automatically enters Access Point mode if no saved Wi-Fi is available.
+
+- **Reliability**:
+- **Non-Volatile Memory: All settings are securely saved in ESP32 Flash (Preferences).
+- **Internal RTC Persistence: Enhanced time-keeping stability without constant internet polling.
+  
 
 ![Air Quality Monitor](air-quality-monitor.jpeg)
 ![Air Quality Monitor_web](web.jpg)
