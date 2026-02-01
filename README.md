@@ -60,15 +60,26 @@ The device uses universal color-coding for both the Web UI and the TFT Display:
 
 ## ⚙️ Configuration & Setup
 
-1. **Upload**: Flash the provided `air_quality_monitor.ino` sketch to your ESP32-S3.
-2. **First Boot**: The device will create a Wi-Fi network: `AIR-SCAN-CONFIG` (Pass: `12345678`).
-3. **Web Portal**: Connect your phone/PC to this network and go to `http://192.168.4.1`.
-4. **Settings**: 
-   - Scan for your home Wi-Fi.
-   - Enter MQTT Broker details (if used).
-   - Click **Save & Restart**.
-5. **Operation**: After reboot, the device will show its new local IP on the screen. Use this IP to view the real-time web dashboard.
+1. **Upload**: 
+   - Download the `AirMonitor_v2.0` directory.
+   - Open `AirMonitor_v2.0.ino` in your Arduino IDE. 
+   - *Note: Ensure all project files (.ino, .h, .cpp) remain in this folder for the project to compile correctly.*
+   - Select **ESP32-S3 Dev Module** and flash the sketch to your device.
 
+2. **First Boot**: 
+   - The device will create a temporary Wi-Fi network: `AIR-SCAN-CONFIG` (Password: `12345678`).
+
+3. **Web Portal**: 
+   - Connect your phone or PC to this network and navigate to `http://192.168.4.1` in your browser.
+
+4. **Settings**: 
+   - Scan for your local Wi-Fi network and enter the credentials.
+   - Enter your **MQTT Broker** details (optional).
+   - Click **Save & Restart**.
+
+5. **Operation**: 
+   - After rebooting, the device will display its new local IP address on the screen. 
+   - Enter this IP in your browser to access the real-time monitoring dashboard.
 ---
 
 ## 📡 MQTT Payload Format
