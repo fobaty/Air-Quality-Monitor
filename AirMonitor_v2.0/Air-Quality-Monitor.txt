@@ -1,4 +1,0 @@
-  Air Quality Monitor
-  GitHub: https://github.com/fobaty/Air-Quality-Monitor
-  Version: 2.0
-  Glory to Ukraine!
