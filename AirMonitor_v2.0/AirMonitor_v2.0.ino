@@ -7,6 +7,16 @@
 const String VERSION = "V2.0";
 #include "Global.h"
 
+#undef ST77XX_RED
+#undef ST77XX_BLUE
+#undef ST77XX_CYAN
+#undef ST77XX_ORANGE
+
+#define ST77XX_RED    0x001F  // The library thinks it's Blue, but the display will show Red.
+#define ST77XX_BLUE   0xF800 // The library thinks it's Red, but the display will show Blue.
+#define ST77XX_CYAN   0xFFE0 // Inverted Cyan
+#define ST77XX_ORANGE 0x045F // The correct orange color for this type of matrix.
+
 // Initialize Global Objects
 WebServer server(80);
 WiFiClient espClient;
@@ -35,9 +45,13 @@ unsigned long graphInterval = 30000;
 void setup() {
   setCpuFrequencyMhz(160);
   Serial.begin(115200);
+
   pinMode(TFT_BL, OUTPUT); digitalWrite(TFT_BL, HIGH);
   spiTFT.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
-  tft.initR(INITR_GREENTAB); tft.setRotation(0); tft.fillScreen(ST77XX_BLACK);
+  tft.initR(INITR_GREENTAB); 
+  tft.invertDisplay(false);
+  tft.setRotation(0); 
+  tft.fillScreen(ST77XX_BLACK);
 
   // Splash Screen
   tft.drawRoundRect(5, 5, tft.width() - 10, 45, 8, ST77XX_CYAN);
